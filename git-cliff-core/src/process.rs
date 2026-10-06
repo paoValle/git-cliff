@@ -18,6 +18,12 @@ impl<'cfg, 'sum> CommitProcessor<'cfg, 'sum> {
 
     /// Runs commit processing and final validation checks.
     pub fn run<'a>(&mut self, commits: &mut Vec<Commit<'a>>) -> Result<()> {
+        // Before grouping, while the whole commit set is still here: a short SHA is a prefix
+        // match, so a prefix matching more than one commit would quietly put all of them in the
+        // same group. git refuses an ambiguous revision and so does this, because the alternative
+        // is a changelog that looks right and is not.
+        self.check_short_shas(commits)?;
+
         if let Some(order) = &self.config.processing_order {
             self.run_with_order(commits, order);
         } else {
@@ -196,6 +202,43 @@ impl<'cfg, 'sum> CommitProcessor<'cfg, 'sum> {
         }
     }
 
+    /// Validates that every `sha` in `commit_parsers` identifies at most one commit.
+    ///
+    /// The rule is written as "matches more than one commit" rather than "is shorter than a full
+    /// id": that is the property that matters, it needs no assumption about the hash length, and a
+    /// full SHA can never match two different commits.
+    fn check_short_shas(&self, commits: &[Commit<'_>]) -> Result<()> {
+        for parser in &self.config.commit_parsers {
+            let Some(sha) = parser.sha.as_deref().map(str::to_lowercase) else {
+                continue;
+            };
+            // Distinct ids, not matching entries: two entries for the same commit are the same
+            // revision, and git would not call that ambiguous either.
+            let matched: std::collections::BTreeSet<&str> = commits
+                .iter()
+                .map(|commit| commit.id.as_str())
+                .filter(|id| id.starts_with(&sha))
+                .collect();
+            if matched.len() > 1 {
+                return Err(AppError::GroupError(format!(
+                    "short SHA `{sha}` in `commit_parsers` is ambiguous: it matches {} commits \
+                     ({}). Use more characters to name one.",
+                    matched.len(),
+                    // full ids, not git's abbreviation: abbreviating them to seven characters is
+                    // exactly what makes a prefix ambiguous, and the point of this message is to
+                    // show which commits collided
+                    matched
+                        .iter()
+                        .take(3)
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Validates that all processed commits are conventional.
     fn check_conventional_commits(&self, commits: &[Commit<'_>]) -> Result<()> {
         tracing::debug!("Verifying that all commits are conventional");
@@ -263,6 +306,127 @@ mod test {
 
     use super::*;
     use crate::config::{CommitParser, ProcessingStep};
+
+    fn config_with_sha(sha: &str) -> crate::config::GitConfig {
+        crate::config::GitConfig {
+            commit_parsers: vec![CommitParser {
+                sha: Some(String::from(sha)),
+                message: None,
+                body: None,
+                footer: None,
+                group: Some(String::from("Added")),
+                default_scope: None,
+                scope: None,
+                skip: None,
+                r#continue: None,
+                field: None,
+                pattern: None,
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn the_same_commit_twice_is_not_ambiguous() -> Result<()> {
+        // Two entries for the same revision: the prefix identifies one commit, not two, and git
+        // would not call that ambiguous either.
+        let mut commits = vec![
+            Commit::new(String::from("abc1234aaa"), String::from("feat: one")),
+            Commit::new(
+                String::from("abc1234aaa"),
+                String::from("feat: one, taken from another branch"),
+            ),
+        ];
+        CommitProcessor::new(&config_with_sha("abc1234"), &mut Summary::default())
+            .run(&mut commits)?;
+        assert!(
+            commits
+                .iter()
+                .all(|commit| commit.group.as_deref() == Some("Added"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn an_ambiguous_short_sha_names_only_the_first_three_commits() {
+        let mut commits: Vec<Commit<'_>> = (0..4)
+            .map(|index| Commit::new(format!("abc1234{index}"), String::from("feat: something")))
+            .collect();
+
+        let error = CommitProcessor::new(&config_with_sha("abc1234"), &mut Summary::default())
+            .run(&mut commits)
+            .expect_err("four commits share the prefix");
+        let message = format!("{error}");
+
+        // the count is exact, the list is truncated: a message that named four hundred commits
+        // would be unreadable in a terminal
+        assert!(message.contains("matches 4 commits"), "{message}");
+        assert!(message.contains("abc12340"), "{message}");
+        assert!(message.contains("abc12342"), "{message}");
+        assert!(!message.contains("abc12343"), "{message}");
+    }
+
+    #[test]
+    fn ambiguous_short_sha_is_an_error() {
+        let mut commits = vec![
+            Commit::new(String::from("abc1234aaa"), String::from("feat: one")),
+            Commit::new(String::from("abc1234bbb"), String::from("fix: two")),
+        ];
+        let cfg = crate::config::GitConfig {
+            commit_parsers: vec![CommitParser {
+                sha: Some(String::from("abc1234")),
+                message: None,
+                body: None,
+                footer: None,
+                group: Some(String::from("Added")),
+                default_scope: None,
+                scope: None,
+                skip: None,
+                r#continue: None,
+                field: None,
+                pattern: None,
+            }],
+            ..Default::default()
+        };
+
+        let error = CommitProcessor::new(&cfg, &mut Summary::default())
+            .run(&mut commits)
+            .expect_err("a prefix matching two commits must not be accepted silently");
+        assert!(format!("{error}").contains("ambiguous"), "{error}");
+    }
+
+    #[test]
+    fn a_short_sha_matching_one_commit_groups_it() -> Result<()> {
+        let mut commits = vec![
+            Commit::new(String::from("abc1234aaa"), String::from("feat: one")),
+            Commit::new(String::from("def5678bbb"), String::from("feat: two")),
+        ];
+        let cfg = crate::config::GitConfig {
+            commit_parsers: vec![CommitParser {
+                sha: Some(String::from("abc1234")),
+                message: None,
+                body: None,
+                footer: None,
+                group: Some(String::from("Added")),
+                default_scope: None,
+                scope: None,
+                skip: None,
+                r#continue: None,
+                field: None,
+                pattern: None,
+            }],
+            ..Default::default()
+        };
+
+        CommitProcessor::new(&cfg, &mut Summary::default()).run(&mut commits)?;
+        let grouped: Vec<&Commit<'_>> = commits
+            .iter()
+            .filter(|commit| commit.group.as_deref() == Some("Added"))
+            .collect();
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].id, "abc1234aaa");
+        Ok(())
+    }
 
     #[test]
     fn list_keeps_legacy_behavior_when_order_is_unset() -> Result<()> {

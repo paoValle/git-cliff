@@ -234,6 +234,8 @@ Examples:
   - Skip a specific commit by using its SHA1.
 - `{ sha = "f6f2472bdf0bbb5f9fcaf2d72c1fa9f98f772bb2", group = "Stuff" }`
   - Set the group of the commit by using its SHA1.
+- `{ sha = "f6f2472", group = "Stuff" }`
+  - Same, with a short SHA: any unambiguous prefix of a commit id works, so the short SHAs in `git cliff -vv` output can be copied directly instead of being expanded by hand. A prefix that matches more than one commit is an error, not a match of all of them.
 - `{ field = "author.name", pattern = "John Doe", group = "John's stuff" }`
   - If the author's name attribute of the commit matches the pattern "John Doe" (as a regex), override the scope with "John's stuff".
   - All values that are part of the commit context can be used. Nested fields can be accessed via the [dot notation](https://keats.github.io/tera/#dot-notation). Some commonly used ones are:

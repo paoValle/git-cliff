@@ -333,8 +333,11 @@ impl Commit<'_> {
         // at the end even though no parser returned early.
         let mut matched = false;
         'parsers: for parser in parsers {
+            // A full SHA is a prefix of itself, so one comparison covers both. Git accepts
+            // unambiguous short SHAs everywhere else; refusing them here meant copying 40
+            // characters out of `-vv` output.
             if let Some(sha) = parser.sha.as_ref() &&
-                sha.to_lowercase() != self.id
+                !self.id.starts_with(&sha.to_lowercase())
             {
                 continue 'parsers;
             }
@@ -633,6 +636,44 @@ pub(crate) fn commits_to_conventional_commits<'de, 'a, D: Deserializer<'de>>(
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn parse_matches_a_short_sha_by_prefix() -> Result<()> {
+        let commit = Commit::new(
+            String::from("20246539df88431c72d65d7d0d1b82fba3deec34"),
+            String::from("feat: add feature"),
+        );
+        let parser = |sha: &str| CommitParser {
+            sha: Some(String::from(sha)),
+            message: None,
+            body: None,
+            footer: None,
+            group: Some(String::from("Added")),
+            default_scope: None,
+            scope: None,
+            skip: None,
+            r#continue: None,
+            field: None,
+            pattern: None,
+        };
+
+        for sha in [
+            "20246539df88431c72d65d7d0d1b82fba3deec34",
+            "2024653",
+            "20246539DF88",
+        ] {
+            let parsed = commit.clone().parse(&[parser(sha)], false, false)?;
+            assert_eq!(parsed.group.as_deref(), Some("Added"), "{sha} should match");
+        }
+
+        let parsed = commit.clone().parse(&[parser("deadbee")], false, false)?;
+        assert_eq!(
+            parsed.group, None,
+            "a prefix that matches nothing groups nothing"
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn conventional_commit() -> Result<()> {

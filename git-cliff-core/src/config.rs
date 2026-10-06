@@ -473,6 +473,10 @@ impl Bump {
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CommitParser {
     /// SHA1 of the commit.
+    ///
+    /// A full id, or an unambiguous prefix of one, so a short SHA copied from `git cliff -vv`
+    /// output can be used as is. A prefix that matches more than one commit is an error rather
+    /// than a match of all of them.
     pub sha: Option<String>,
     /// Regex for matching the commit message.
     #[serde(with = "serde_regex", default)]
